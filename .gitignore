@@ -1,3 +1,4 @@
 ## Python Utils
 __pycache__
 venv
+.env
