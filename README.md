@@ -51,9 +51,26 @@ MONGODB_DB_NAME=bathroom_online
 
 ## 🚀 使用方式
 
-本工具提供兩支專用匯入腳本，分別處理 **環境部 (MOENV)** 與 **臺北市政府開放資料 (Data.Taipei)** 兩種格式：
+本工具提供三支專用匯入腳本，分別處理 **環境部 API 自動爬取 (MOENV API)**、**環境部本機 JSON (MOENV JSON)** 與 **臺北市政府開放資料 (Data.Taipei)**：
 
-### 1. 環境部格式公廁匯入 (`import_moenv.py`)
+### 1. 環境部 API 自動翻頁爬蟲匯入 (`import_moenv_api.py` ⭐ 推薦)
+適用於直接從環境部開放資料 API 端點（MOENV API v2）自動翻頁爬取全台公廁資料，支援重複略過與 API 清單管理：
+
+```bash
+# 執行自動翻頁爬取並匯入 MongoDB (預設自動比對並略過已存在公廁)
+python import_moenv_api.py
+
+# 預覽爬取與合併結果 (Dry-Run 模式，測試抓取前 2 頁)
+python import_moenv_api.py --dry-run --max-pages 2
+
+# 自訂 API Endpoint 或自訂起始 offset
+python import_moenv_api.py --url "https://data.moenv.gov.tw/api/v2/fac_p_07?offset=0&limit=1000&api_key=40eaf06a-f396-4f27-8703-016cebce83c8"
+
+# 爬取並同時備份合併後之 JSON 資料至本機
+python import_moenv_api.py --save-json data/moenv_api_crawled.json
+```
+
+### 2. 環境部格式公廁匯入 (`import_moenv.py`)
 適用於全台、基隆市、宜蘭縣等 MOENV 開放資料格式（如 `data/*_moenv.json`）：
 
 ```bash
@@ -119,7 +136,8 @@ bathroom-genius-crawler/
 │   ├── yilan_moenv.json               # 宜蘭縣公廁開放資料 (MOENV 格式)
 │   ├── taiwan_moenv.json              # 台灣公廁開放資料 (MOENV 格式)
 │   └── taipei_datataipei.json         # 臺北市公廁開放資料 (Data.Taipei 格式)
-├── import_moenv.py                    # MOENV 格式公廁解析與匯入腳本
+├── import_moenv.py                    # MOENV 格式公廁解析與匯入腳本 (本機 JSON 檔案)
+├── import_moenv_api.py                # MOENV API 自動翻頁爬取與匯入腳本 (API 即時資料)
 ├── import_datataipei.py               # Data.Taipei 格式公廁解析與匯入腳本
 ├── requirements.txt                   # Python 相依套件清單
 ├── .env.sample                        # 環境變數範本檔
