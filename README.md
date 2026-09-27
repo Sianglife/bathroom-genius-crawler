@@ -51,39 +51,41 @@ MONGODB_DB_NAME=bathroom_online
 
 ## 🚀 使用方式
 
-### 1. 快速匯入（使用預設設定）
-預設讀取 `data/bathroom_taiwan_moenv.json` 並匯入至 `.env` 指定之 MongoDB：
+本工具提供兩支專用匯入腳本，分別處理 **環境部 (MOENV)** 與 **臺北市政府開放資料 (Data.Taipei)** 兩種格式：
+
+### 1. 環境部格式公廁匯入 (`import_moenv.py`)
+適用於全台、基隆市、宜蘭縣等 MOENV 開放資料格式（如 `data/*_moenv.json`）：
+
 ```bash
-python import_json.py
+# 匯入基隆市公廁資料
+python import_moenv.py -f data/keelung_moenv.json
+
+# 匯入宜蘭縣公廁資料
+python import_moenv.py -f data/yilan_moenv.json
+
+# 預覽轉換與合併結果 (Dry-Run 模式，不寫入 MongoDB)
+python import_moenv.py -f data/keelung_moenv.json --dry-run
 ```
 
-### 2. 匯入指定資料檔案
-匯入基隆市公廁資料檔案：
+### 2. 臺北市政府開放資料格式匯入 (`import_datataipei.py`)
+適用於臺北市資料大平臺 (Data.Taipei) 公廁開放資料格式（如 `data/taipei_datataipei.json`）：
+
 ```bash
-python import_json.py --file data/bathroom_keelung_moenv.json
+# 匯入臺北市公廁資料
+python import_datataipei.py -f data/taipei_datataipei.json
+
+# 預覽轉換與合併結果 (Dry-Run 模式)
+python import_datataipei.py -f data/taipei_datataipei.json --dry-run
 ```
 
-或使用簡寫 `-f`：
+### 3. 進階選項（兩支腳本通用）
 ```bash
-python import_json.py -f data/bathroom_keelung_moenv.json
-```
+# 匯入前先清空 Collection
+python import_moenv.py -f data/keelung_moenv.json --drop
 
-### 3. Dry-Run 預覽模式（不寫入資料庫）
-在不連線 MongoDB 的情況下測試解析、分組與合併邏輯，並印出轉換後的 Document 範例與統計：
-```bash
-python import_json.py -f data/bathroom_keelung_moenv.json --dry-run
-```
-
-### 4. 清空目標 Collection 後重新匯入
-若需在匯入前先清空目標 Collection（例如重建資料集）：
-```bash
-python import_json.py -f data/bathroom_keelung_moenv.json --drop
-```
-
-### 5. 自訂連線參數與批次大小
-```bash
-python import_json.py \
-  --file data/bathroom_keelung_moenv.json \
+# 指定 MongoDB 連線參數與批次寫入大小
+python import_datataipei.py \
+  -f data/taipei_datataipei.json \
   --uri "mongodb://localhost:27017" \
   --db "bathroom_online" \
   --collection "toilets" \
@@ -96,7 +98,7 @@ python import_json.py \
 
 | 參數 | 簡寫 | 預設值 | 說明 |
 | :--- | :--- | :--- | :--- |
-| `--file` | `-f` | `data/bathroom_taiwan_moenv.json` | 要匯入的 JSON 檔案路徑 |
+| `--file` | `-f` | 各腳本預設路徑 | 要匯入的 JSON 檔案路徑 |
 | `--dry-run` | | `False` | 僅執行解析、分組與校驗，不寫入 MongoDB |
 | `--drop` | | `False` | 匯入前先清空目標 Collection |
 | `--env-file` | `-e` | 專案根目錄 `.env` | 自訂 `.env` 檔案路徑 |
@@ -113,10 +115,12 @@ python import_json.py \
 ```text
 bathroom-genius-crawler/
 ├── data/
-│   ├── bathroom_keelung_moenv.json    # 基隆市公廁開放資料 (850 筆)
-│   ├── bathroom_taiwan_moenv.json     # 台灣公廁開放資料 (1000 筆)
-│   └── ...
-├── import_json.py                     # 核心 JSON 資料解析、合併與匯入腳本
+│   ├── keelung_moenv.json             # 基隆市公廁開放資料 (MOENV 格式)
+│   ├── yilan_moenv.json               # 宜蘭縣公廁開放資料 (MOENV 格式)
+│   ├── taiwan_moenv.json              # 台灣公廁開放資料 (MOENV 格式)
+│   └── taipei_datataipei.json         # 臺北市公廁開放資料 (Data.Taipei 格式)
+├── import_moenv.py                    # MOENV 格式公廁解析與匯入腳本
+├── import_datataipei.py               # Data.Taipei 格式公廁解析與匯入腳本
 ├── requirements.txt                   # Python 相依套件清單
 ├── .env.sample                        # 環境變數範本檔
 ├── .env                               # 環境變數設定檔（內含 MongoDB URI，請勿版控）
