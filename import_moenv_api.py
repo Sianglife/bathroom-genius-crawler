@@ -801,7 +801,7 @@ def main():
                 batch = docs_to_insert[i:i + args.batch_size]
                 insert_ops = [InsertOne(d) for d in batch]
                 res = collection.bulk_write(insert_ops, ordered=False)
-                total_inserted += len(res.inserted_ids)
+                total_inserted += res.inserted_count
                 print(f"   已寫入 {min(i + args.batch_size, len(docs_to_insert))}/{len(docs_to_insert)} 筆新增資料...")
     else:
         print("🔄 [更新模式] 對已存在之公廁執行 Upsert 更新...")
