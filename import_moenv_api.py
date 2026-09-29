@@ -615,22 +615,37 @@ def main():
         help="批次寫入筆數 (預設: 500)",
     )
 
-    args = parser.parse_args()
-
+def run_import(
+    env_file: Optional[str] = None,
+    uri: Optional[str] = None,
+    db: Optional[str] = None,
+    collection: str = "toilets",
+    url: Optional[str] = None,
+    start_offset: int = 0,
+    page_limit: int = 1000,
+    max_pages: Optional[int] = None,
+    skip_duplicates: bool = True,
+    update_existing: bool = False,
+    drop: bool = False,
+    dry_run: bool = False,
+    save_json: Optional[str] = None,
+    batch_size: int = 500
+) -> Dict[str, Any]:
+    """執行 MOENV API 公廁抓取與匯入程序，並回傳統計字典"""
     # 1. 載入環境變數
-    env_path = Path(args.env_file).resolve() if args.env_file else Path(__file__).resolve().parent / ".env"
+    env_path = Path(env_file).resolve() if env_file else Path(__file__).resolve().parent / ".env"
     load_environment_variables(env_path)
 
     # 2. 決定 MongoDB 連線參數
-    mongo_uri = args.uri or os.getenv("MONGODB_URI")
-    mongo_db_name = args.db or os.getenv("MONGODB_DB_NAME", "bathroom_online")
+    mongo_uri = uri or os.getenv("MONGODB_URI")
+    mongo_db_name = db or os.getenv("MONGODB_DB_NAME", "bathroom_online")
 
     print("=" * 68)
     print("🚽 Bathroom Genius - 環境部 API 公廁自動爬蟲與匯入工具")
     print("=" * 68)
 
     # 3. 決定 API Endpoints 清單
-    endpoints = [args.url] if args.url else MOENV_API_ENDPOINTS
+    endpoints = [url] if url else MOENV_API_ENDPOINTS
     print(f"📋 共配置 {len(endpoints)} 個 API 端點")
     for i, ep in enumerate(endpoints, 1):
         print(f"  {i}. {ep}")
@@ -640,15 +655,15 @@ def main():
     raw_data = crawl_all_endpoints(
         endpoint_urls=endpoints,
         ssl_context=ssl_context,
-        start_offset=args.start_offset,
-        page_limit=args.page_limit,
-        max_pages=args.max_pages,
+        start_offset=start_offset,
+        page_limit=page_limit,
+        max_pages=max_pages,
     )
 
     total_records = len(raw_data)
     if total_records == 0:
         print("⚠️ 未抓取到任何公廁資料，程式結束。")
-        return
+        return {"raw_records": 0, "valid_docs": 0, "inserted": 0, "upserted": 0, "modified": 0, "skipped": 0, "db_total": 0}
 
     print(f"\n📊 API 抓取完成，共取得 {total_records} 筆原始公廁紀錄")
 
@@ -680,15 +695,14 @@ def main():
 
     print(f"✅ 資料合併完成：成功產出 {len(valid_docs)} 筆公廁 Document / 經緯度無效略過 {skipped_invalid_count} 筆")
 
-    # 7. 若有指定 --save-json 則輸出本機檔案
-    if args.save_json:
-        save_path = Path(args.save_json)
+    # 7. 若有指定 save_json 則輸出本機檔案
+    if save_json:
+        save_path = Path(save_json)
         if not save_path.is_absolute():
             save_path = Path(__file__).resolve().parent / save_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"💾 正在儲存合併後資料至本機：{save_path}")
-        
-        # 轉換 datetime 為 ISO 格式以利 JSON 序列化
+
         serializable_docs = []
         for d in valid_docs:
             d_copy = {**d}
@@ -703,7 +717,7 @@ def main():
         print("✅ JSON 檔案儲存成功！")
 
     # 若為 Dry-Run 模式則印出示範並結束
-    if args.dry_run:
+    if dry_run:
         print("\n🔍 [Dry-Run 模式] 不會連線寫入 MongoDB。以下為具代表性的轉換與合併範例：")
         sample_count = min(3, len(valid_docs))
         for i in range(sample_count):
@@ -716,51 +730,44 @@ def main():
             print(f"\n--- 範例 #{i + 1} ({sample_copy['name']}) ---")
             print(json.dumps(sample_copy, ensure_ascii=False, indent=2))
         print("\n✨ Dry-Run 檢驗完畢！")
-        return
+        return {"raw_records": total_records, "valid_docs": len(valid_docs), "inserted": 0, "upserted": 0, "modified": 0, "skipped": 0, "db_total": 0}
 
     # 8. 連線至 MongoDB
     if MongoClient is None:
-        print("❌ 缺少 pymongo 套件，請先執行: pip install pymongo dnspython python-dotenv")
-        sys.exit(1)
+        raise ImportError("缺少 pymongo 套件，請先執行: pip install pymongo dnspython python-dotenv")
 
     if not mongo_uri:
-        print("❌ 未提供 MONGODB_URI，請檢查 .env 檔案或使用 --uri 參數傳入")
-        sys.exit(1)
+        raise ValueError("未提供 MONGODB_URI，請檢查 .env 檔案或使用 uri 參數傳入")
 
-    print(f"\n🔌 正在連線至 MongoDB 資料庫：{mongo_db_name} (Collection: {args.collection}) ...")
-    try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
-        client.admin.command("ping")
-        db = client[mongo_db_name]
-        collection = db[args.collection]
-        print(" Connected to MongoDB successfully!")
-    except Exception as e:
-        print(f"❌ MongoDB 連線失敗：{e}")
-        sys.exit(1)
+    print(f"\n🔌 正在連線至 MongoDB 資料庫：{mongo_db_name} (Collection: {collection}) ...")
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+    client.admin.command("ping")
+    db_obj = client[mongo_db_name]
+    col_obj = db_obj[collection]
+    print(" Connected to MongoDB successfully!")
 
-    # 若指定 --drop 則清空集合
-    if args.drop:
-        print(f"🧹 正在清空集合 '{args.collection}' ...")
-        collection.drop()
+    # 若指定 drop 則清空集合
+    if drop:
+        print(f"🧹 正在清空集合 '{collection}' ...")
+        col_obj.drop()
         print("✨ 集合已清空")
 
     # 建立 2dsphere 空間索引
     print("📍 正在確認/建立 2dsphere 空間索引 (location) ...")
     try:
-        collection.create_index([("location", "2dsphere")])
+        col_obj.create_index([("location", "2dsphere")])
         print("✅ 2dsphere 索引已建立/確認完畢")
     except Exception as e:
         print(f"⚠️ 建立 2dsphere 索引時發生警告：{e}")
 
-    # 9. 檢查資料庫重複紀錄 (若啟用 --skip-duplicates 且未指定 --update-existing)
-    mode_skip_duplicates = args.skip_duplicates and not args.update_existing
+    # 9. 檢查資料庫重複紀錄
+    mode_skip_duplicates = skip_duplicates and not update_existing
     existing_db_keys: Set[Tuple[str, str]] = set()
 
     if mode_skip_duplicates:
         print("🔎 正在比對資料庫中已存在的公廁紀錄 (以 name + address 比對)...")
         try:
-            # 僅拉取 name, address 欄位進行極速比對
-            cursor = collection.find({}, {"name": 1, "address": 1, "_id": 0})
+            cursor = col_obj.find({}, {"name": 1, "address": 1, "_id": 0})
             for record in cursor:
                 r_name = str(record.get("name", "")).strip()
                 r_addr = str(record.get("address", "")).strip()
@@ -773,10 +780,8 @@ def main():
 
     # 10. 匯入或寫入 MongoDB
     print(f"\n🚀 開始執行匯入處理 (共 {len(valid_docs)} 筆待處理資料) ...")
-    
     docs_to_insert: List[Dict[str, Any]] = []
     skipped_duplicate_count = 0
-    upsert_operations = []
 
     total_inserted = 0
     total_upserted = 0
@@ -790,19 +795,18 @@ def main():
                 skipped_duplicate_count += 1
             else:
                 docs_to_insert.append(doc)
-                existing_db_keys.add(key)  # 避免同一批次內後續重複
+                existing_db_keys.add(key)
 
         print(f"   • 略過重複筆數 (Skipped): {skipped_duplicate_count} 筆")
         print(f"   • 預備新增筆數 (To Insert): {len(docs_to_insert)} 筆")
 
-        # 批次寫入新增資料
         if docs_to_insert:
-            for i in range(0, len(docs_to_insert), args.batch_size):
-                batch = docs_to_insert[i:i + args.batch_size]
+            for i in range(0, len(docs_to_insert), batch_size):
+                batch = docs_to_insert[i:i + batch_size]
                 insert_ops = [InsertOne(d) for d in batch]
-                res = collection.bulk_write(insert_ops, ordered=False)
+                res = col_obj.bulk_write(insert_ops, ordered=False)
                 total_inserted += res.inserted_count
-                print(f"   已寫入 {min(i + args.batch_size, len(docs_to_insert))}/{len(docs_to_insert)} 筆新增資料...")
+                print(f"   已寫入 {min(i + batch_size, len(docs_to_insert))}/{len(docs_to_insert)} 筆新增資料...")
     else:
         print("🔄 [更新模式] 對已存在之公廁執行 Upsert 更新...")
         batch_operations = []
@@ -832,21 +836,22 @@ def main():
             }
             batch_operations.append(UpdateOne(filter_query, update_doc, upsert=True))
 
-            if len(batch_operations) >= args.batch_size:
-                result = collection.bulk_write(batch_operations, ordered=False)
+            if len(batch_operations) >= batch_size:
+                result = col_obj.bulk_write(batch_operations, ordered=False)
                 total_upserted += len(result.upserted_ids)
                 total_modified += result.modified_count
                 batch_operations.clear()
                 print(f"   已處理 {i + 1}/{len(valid_docs)} 筆...")
 
         if batch_operations:
-            result = collection.bulk_write(batch_operations, ordered=False)
+            result = col_obj.bulk_write(batch_operations, ordered=False)
             total_upserted += len(result.upserted_ids)
             total_modified += result.modified_count
             batch_operations.clear()
 
-    # 11. 最終統計報告
-    current_db_total = collection.count_documents({})
+    current_db_total = col_obj.count_documents({})
+    client.close()
+
     print("\n" + "=" * 68)
     print("🎉 匯入完成！統計報告：")
     print(f"  • API 原始抓取筆數   ：{total_records}")
@@ -860,6 +865,122 @@ def main():
     print(f"  • 資料庫目前總筆數   ：{current_db_total}")
     print("=" * 68)
 
+    return {
+        "raw_records": total_records,
+        "valid_docs": len(valid_docs),
+        "inserted": total_inserted,
+        "upserted": total_upserted,
+        "modified": total_modified,
+        "skipped": skipped_duplicate_count,
+        "db_total": current_db_total
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Bathroom Genius - 環境部 (MOENV) 公廁 API 自動抓取與匯入工具",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--env-file",
+        "-e",
+        default=None,
+        help=".env 檔案路徑 (預設自動偵測專案目錄 .env)",
+    )
+    parser.add_argument(
+        "--uri",
+        "-u",
+        default=None,
+        help="MongoDB 連線 URI (優先於 .env 設定)",
+    )
+    parser.add_argument(
+        "--db",
+        "-d",
+        default=None,
+        help="MongoDB 資料庫名稱 (優先於 .env 中的 MONGODB_DB_NAME)",
+    )
+    parser.add_argument(
+        "--url",
+        default=None,
+        help="自訂單一 API Endpoint URL (預設使用全台 23 個縣市端點清單)",
+    )
+    parser.add_argument(
+        "--start-offset",
+        type=int,
+        default=0,
+        help="起始 offset 偏移量 (預設: 0)",
+    )
+    parser.add_argument(
+        "--page-limit",
+        type=int,
+        default=1000,
+        help="每頁取得筆數 (預設: 1000)",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="每個端點最大翻頁數 (預設: 無限制，直到資料取完為止)",
+    )
+    parser.add_argument(
+        "--collection",
+        "-c",
+        default="toilets",
+        help="目標 Collection 名稱 (預設: toilets)",
+    )
+    parser.add_argument(
+        "--skip-duplicates",
+        action="store_true",
+        default=True,
+        help="匯入前比對資料庫，若已存在相同 (name, address) 則略過 (預設啟用)",
+    )
+    parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help="遇到重複時執行 Upsert 更新資料而非略過",
+    )
+    parser.add_argument(
+        "--drop",
+        action="store_true",
+        help="匯入前清空目標 Collection",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="僅執行 API 抓取、翻頁、解析與校驗，不實際連線寫入 MongoDB",
+    )
+    parser.add_argument(
+        "--save-json",
+        default=None,
+        help="將抓取並合併後的資料儲存為本機 JSON 檔案 (例如: data/moenv_api_crawled.json)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="批次寫入筆數 (預設: 500)",
+    )
+
+    args = parser.parse_args()
+
+    run_import(
+        env_file=args.env_file,
+        uri=args.uri,
+        db=args.db,
+        collection=args.collection,
+        url=args.url,
+        start_offset=args.start_offset,
+        page_limit=args.page_limit,
+        max_pages=args.max_pages,
+        skip_duplicates=args.skip_duplicates,
+        update_existing=args.update_existing,
+        drop=args.drop,
+        dry_run=args.dry_run,
+        save_json=args.save_json,
+        batch_size=args.batch_size
+    )
+
 
 if __name__ == "__main__":
     main()
+

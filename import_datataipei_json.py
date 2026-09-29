@@ -345,22 +345,209 @@ def load_taipei_json_records(json_path: Path) -> List[Dict[str, Any]]:
         raise ValueError(f"未知的 JSON 格式型態: {type(raw_data)}")
 
 
+def run_import(
+    file_path: Optional[str] = None,
+    env_file: Optional[str] = None,
+    uri: Optional[str] = None,
+    db: Optional[str] = None,
+    collection: str = "toilets",
+    drop: bool = False,
+    dry_run: bool = False,
+    batch_size: int = 500
+) -> Dict[str, Any]:
+    """執行臺北市 Data.Taipei JSON 匯入程序，並回傳統計字典"""
+    # 1. 載入環境變數
+    env_path = Path(env_file).resolve() if env_file else Path(__file__).resolve().parent / ".env"
+    load_environment_variables(env_path)
+
+    # 2. 決定 MongoDB 連線參數
+    mongo_uri = uri or os.getenv("MONGODB_URI")
+    mongo_db_name = db or os.getenv("MONGODB_DB_NAME", "bathroom_online")
+
+    print("=" * 68)
+    print("🚽 Bathroom Genius - 臺北市 Data.Taipei 公廁 JSON 匯入工具")
+    print("=" * 68)
+
+    # 3. 讀取 JSON 檔案
+    target_file = file_path or "data/taipei_datataipei.json"
+    json_path = Path(target_file)
+    if not json_path.is_absolute():
+        json_path = Path(__file__).resolve().parent / json_path
+
+    if not json_path.exists():
+        print(f"❌ 找不到 JSON 檔案：{json_path}")
+        return {"raw_records": 0, "valid_docs": 0, "upserted": 0, "modified": 0, "matched": 0, "db_total": 0}
+
+    print(f"📂 正在讀取檔案：{json_path}")
+    try:
+        raw_records = load_taipei_json_records(json_path)
+    except Exception as e:
+        print(f"❌ 解析 JSON 檔案失敗：{e}")
+        return {"raw_records": 0, "valid_docs": 0, "upserted": 0, "modified": 0, "matched": 0, "db_total": 0}
+
+    total_records = len(raw_records)
+    print(f"📊 讀取完成，共 {total_records} 筆原始公廁資料")
+
+    # 4. 依地點與主體名稱分組
+    grouped_data = defaultdict(list)
+    for raw_item in raw_records:
+        item = clean_dict_keys(raw_item)
+        addr = str(item.get("公廁地址") or item.get("address") or "").strip()
+        name = str(item.get("公廁名稱") or item.get("name") or "").strip()
+        bname = get_base_name(name)
+        grouped_data[(addr, bname)].append(item)
+
+    merged_locations_count = len(grouped_data)
+    multi_toilet_locations = sum(1 for v in grouped_data.values() if len(v) > 1)
+    print(f"🏢 辨識出 {merged_locations_count} 個獨立公廁地點（其中 {multi_toilet_locations} 處包含多筆合併紀錄）")
+
+    # 5. 轉換與校驗
+    valid_docs: List[Dict[str, Any]] = []
+    skipped_count = 0
+
+    for (addr, bname), items in grouped_data.items():
+        doc, err = merge_taipei_toilet_group(addr, bname, items)
+        if err:
+            skipped_count += 1
+            if skipped_count <= 5:
+                print(f"  ⚠️  {err}")
+        else:
+            valid_docs.append(doc)
+
+    print(f"✅ 資料合併完成：成功產出 {len(valid_docs)} 筆公廁 Document / 略過 {skipped_count} 筆")
+
+    # 若為 Dry-Run 模式則印出示範並結束
+    if dry_run:
+        print("\n🔍 [Dry-Run 模式] 不會寫入 MongoDB。以下為具代表性的轉換與合併範例：")
+        sample_count = min(3, len(valid_docs))
+        for i in range(sample_count):
+            sample = valid_docs[i]
+            sample_copy = {**sample}
+            if isinstance(sample_copy.get("createdAt"), datetime):
+                sample_copy["createdAt"] = sample_copy["createdAt"].isoformat()
+            if isinstance(sample_copy.get("updatedAt"), datetime):
+                sample_copy["updatedAt"] = sample_copy["updatedAt"].isoformat()
+            print(f"\n--- 範例 #{i + 1} ({sample_copy['name']}) ---")
+            print(json.dumps(sample_copy, ensure_ascii=False, indent=2))
+        print("\n✨ Dry-Run 檢驗完畢！")
+        return {"raw_records": total_records, "valid_docs": len(valid_docs), "upserted": 0, "modified": 0, "matched": 0, "db_total": 0}
+
+    # 6. 連線至 MongoDB 並寫入
+    if MongoClient is None:
+        raise ImportError("缺少 pymongo 套件，請先執行: pip install pymongo dnspython python-dotenv")
+
+    if not mongo_uri:
+        raise ValueError("未提供 MONGODB_URI，請檢查 .env 檔案或使用 uri 參數傳入")
+
+    print(f"\n🔌 正在連線至 MongoDB 資料庫：{mongo_db_name} (Collection: {collection}) ...")
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+    client.admin.command("ping")
+    db_obj = client[mongo_db_name]
+    col_obj = db_obj[collection]
+    print(" Connected to MongoDB successfully!")
+
+    # 若指定 drop 則清空集合
+    if drop:
+        print(f"🧹 正在清空集合 '{collection}' ...")
+        col_obj.drop()
+        print("✨ 集合已清空")
+
+    # 建立 2dsphere 空間索引
+    print("📍 正在確認/建立 2dsphere 空間索引 (location) ...")
+    try:
+        col_obj.create_index([("location", "2dsphere")])
+        print("✅ 2dsphere 索引已建立/確認完畢")
+    except Exception as e:
+        print(f"⚠️ 建立 2dsphere 索引時發生警告：{e}")
+
+    # 7. 批次 Upsert 寫入
+    print(f"\n🚀 開始批次匯入 {len(valid_docs)} 筆公廁資料至 MongoDB (每批 {batch_size} 筆) ...")
+    
+    total_upserted = 0
+    total_modified = 0
+    total_matched = 0
+
+    batch_operations = []
+    for i, doc in enumerate(valid_docs):
+        filter_query = {
+            "name": doc["name"],
+            "address": doc["address"],
+        }
+        update_doc = {
+            "$set": {
+                "location": doc["location"],
+                "hasToiletPaper": doc["hasToiletPaper"],
+                "isAccessible": doc["isAccessible"],
+                "tags": doc["tags"],
+                "landmark": doc["landmark"],
+                "note": doc["note"],
+                "updatedAt": doc["updatedAt"],
+            },
+            "$setOnInsert": {
+                "name": doc["name"],
+                "address": doc["address"],
+                "avgCleanScore": doc["avgCleanScore"],
+                "avgConvenienceScore": doc["avgConvenienceScore"],
+                "reviewCount": doc["reviewCount"],
+                "createdAt": doc["createdAt"],
+            }
+        }
+        batch_operations.append(UpdateOne(filter_query, update_doc, upsert=True))
+
+        if len(batch_operations) >= batch_size:
+            result = col_obj.bulk_write(batch_operations, ordered=False)
+            total_upserted += len(result.upserted_ids)
+            total_modified += result.modified_count
+            total_matched += result.matched_count
+            batch_operations.clear()
+            print(f"   已處理 {i + 1}/{len(valid_docs)} 筆...")
+
+    if batch_operations:
+        result = col_obj.bulk_write(batch_operations, ordered=False)
+        total_upserted += len(result.upserted_ids)
+        total_modified += result.modified_count
+        total_matched += result.matched_count
+        batch_operations.clear()
+
+    current_db_total = col_obj.count_documents({})
+    client.close()
+
+    print("\n" + "=" * 68)
+    print("🎉 匯入完成！統計報告：")
+    print(f"  • 原始資料筆數       ：{total_records}")
+    print(f"  • 合併後獨立公廁總數 ：{len(valid_docs)}")
+    print(f"  • 新增筆數 (Upserted)：{total_upserted}")
+    print(f"  • 更新筆數 (Modified)：{total_modified}")
+    print(f"  • 比對相符 (Matched) ：{total_matched}")
+    print(f"  • 目前資料庫總筆數   ：{current_db_total}")
+    print("=" * 68)
+
+    return {
+        "raw_records": total_records,
+        "valid_docs": len(valid_docs),
+        "upserted": total_upserted,
+        "modified": total_modified,
+        "matched": total_matched,
+        "db_total": current_db_total
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="匯入臺北市 Data.Taipei 公廁 JSON 資料至 MongoDB (Bathroom Genius)",
+        description="Bathroom Genius - 臺北市 (Data.Taipei) 公廁 JSON 資料匯入工具",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--file",
         "-f",
         default="data/taipei_datataipei.json",
-        help="JSON 資料檔案路徑 (預設: data/taipei_datataipei.json)",
+        help="Data.Taipei 公廁 JSON 檔案路徑 (預設: data/taipei_datataipei.json)",
     )
     parser.add_argument(
         "--env-file",
         "-e",
         default=None,
-        help=".env 檔案路徑 (預設自動偵測專案根目錄 .env)",
+        help=".env 檔案路徑 (預設自動偵測專案目錄 .env)",
     )
     parser.add_argument(
         "--uri",
@@ -399,172 +586,16 @@ def main():
 
     args = parser.parse_args()
 
-    # 1. 載入環境變數
-    env_path = Path(args.env_file).resolve() if args.env_file else Path(__file__).resolve().parent / ".env"
-    load_environment_variables(env_path)
-
-    # 2. 決定 MongoDB 連線參數
-    mongo_uri = args.uri or os.getenv("MONGODB_URI")
-    mongo_db_name = args.db or os.getenv("MONGODB_DB_NAME", "bathroom_online")
-
-    print("=" * 68)
-    print("🚽 Bathroom Genius - 臺北市 Data.Taipei 公廁 JSON 匯入工具")
-    print("=" * 68)
-
-    # 3. 讀取 JSON 檔案
-    json_path = Path(args.file)
-    if not json_path.is_absolute():
-        json_path = Path(__file__).resolve().parent / json_path
-
-    if not json_path.exists():
-        print(f"❌ 找不到 JSON 檔案：{json_path}")
-        sys.exit(1)
-
-    print(f"📂 正在讀取檔案：{json_path}")
-    try:
-        raw_records = load_taipei_json_records(json_path)
-    except Exception as e:
-        print(f"❌ 解析 JSON 檔案失敗：{e}")
-        sys.exit(1)
-
-    total_records = len(raw_records)
-    print(f"📊 讀取完成，共 {total_records} 筆原始公廁資料")
-
-    # 4. 依地點與主體名稱分組
-    grouped_data = defaultdict(list)
-    for raw_item in raw_records:
-        item = clean_dict_keys(raw_item)
-        addr = str(item.get("公廁地址") or item.get("address") or "").strip()
-        name = str(item.get("公廁名稱") or item.get("name") or "").strip()
-        bname = get_base_name(name)
-        grouped_data[(addr, bname)].append(item)
-
-    merged_locations_count = len(grouped_data)
-    multi_toilet_locations = sum(1 for v in grouped_data.values() if len(v) > 1)
-    print(f"🏢 辨識出 {merged_locations_count} 個獨立公廁地點（其中 {multi_toilet_locations} 處包含多筆合併紀錄）")
-
-    # 5. 轉換與校驗
-    valid_docs: List[Dict[str, Any]] = []
-    skipped_count = 0
-
-    for (addr, bname), items in grouped_data.items():
-        doc, err = merge_taipei_toilet_group(addr, bname, items)
-        if err:
-            skipped_count += 1
-            if skipped_count <= 5:
-                print(f"  ⚠️  {err}")
-        else:
-            valid_docs.append(doc)
-
-    print(f"✅ 資料合併完成：成功產出 {len(valid_docs)} 筆公廁 Document / 略過 {skipped_count} 筆")
-
-    # 若為 Dry-Run 模式則印出示範並結束
-    if args.dry_run:
-        print("\n🔍 [Dry-Run 模式] 不會寫入 MongoDB。以下為具代表性的轉換與合併範例：")
-        
-        sample_count = min(3, len(valid_docs))
-        for i in range(sample_count):
-            sample = valid_docs[i]
-            sample_copy = {**sample}
-            sample_copy["createdAt"] = sample_copy["createdAt"].isoformat()
-            sample_copy["updatedAt"] = sample_copy["updatedAt"].isoformat()
-            print(f"\n--- 範例 #{i + 1} ({sample_copy['name']}) ---")
-            print(json.dumps(sample_copy, ensure_ascii=False, indent=2))
-        print("\n✨ Dry-Run 檢驗完畢！")
-        return
-
-    # 6. 連線至 MongoDB 並寫入
-    if MongoClient is None:
-        print("❌ 缺少 pymongo 套件，請先執行: pip install pymongo dnspython python-dotenv")
-        sys.exit(1)
-
-    if not mongo_uri:
-        print("❌ 未提供 MONGODB_URI，請檢查 .env 檔案或使用 --uri 參數傳入")
-        sys.exit(1)
-
-    print(f"\n🔌 正在連線至 MongoDB 資料庫：{mongo_db_name} (Collection: {args.collection}) ...")
-    try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
-        client.admin.command("ping")
-        db = client[mongo_db_name]
-        collection = db[args.collection]
-        print(" Connected to MongoDB successfully!")
-    except Exception as e:
-        print(f"❌ MongoDB 連線失敗：{e}")
-        sys.exit(1)
-
-    # 若指定 --drop 則清空集合
-    if args.drop:
-        print(f"🧹 正在清空集合 '{args.collection}' ...")
-        collection.drop()
-        print("✨ 集合已清空")
-
-    # 建立 2dsphere 空間索引
-    print("📍 正在確認/建立 2dsphere 空間索引 (location) ...")
-    try:
-        collection.create_index([("location", "2dsphere")])
-        print("✅ 2dsphere 索引已建立/確認完畢")
-    except Exception as e:
-        print(f"⚠️ 建立 2dsphere 索引時發生警告：{e}")
-
-    # 7. 批次 Upsert 寫入
-    print(f"\n🚀 開始批次匯入 {len(valid_docs)} 筆公廁資料至 MongoDB (每批 {args.batch_size} 筆) ...")
-    
-    total_upserted = 0
-    total_modified = 0
-    total_matched = 0
-
-    batch_operations = []
-    for i, doc in enumerate(valid_docs):
-        filter_query = {
-            "name": doc["name"],
-            "address": doc["address"],
-        }
-        update_doc = {
-            "$set": {
-                "location": doc["location"],
-                "hasToiletPaper": doc["hasToiletPaper"],
-                "isAccessible": doc["isAccessible"],
-                "tags": doc["tags"],
-                "landmark": doc["landmark"],
-                "note": doc["note"],
-                "updatedAt": doc["updatedAt"],
-            },
-            "$setOnInsert": {
-                "name": doc["name"],
-                "address": doc["address"],
-                "avgCleanScore": doc["avgCleanScore"],
-                "avgConvenienceScore": doc["avgConvenienceScore"],
-                "reviewCount": doc["reviewCount"],
-                "createdAt": doc["createdAt"],
-            }
-        }
-        batch_operations.append(UpdateOne(filter_query, update_doc, upsert=True))
-
-        if len(batch_operations) >= args.batch_size:
-            result = collection.bulk_write(batch_operations, ordered=False)
-            total_upserted += len(result.upserted_ids)
-            total_modified += result.modified_count
-            total_matched += result.matched_count
-            batch_operations.clear()
-            print(f"   已處理 {i + 1}/{len(valid_docs)} 筆...")
-
-    if batch_operations:
-        result = collection.bulk_write(batch_operations, ordered=False)
-        total_upserted += len(result.upserted_ids)
-        total_modified += result.modified_count
-        total_matched += result.matched_count
-        batch_operations.clear()
-
-    print("\n" + "=" * 68)
-    print("🎉 匯入完成！統計報告：")
-    print(f"  • 原始資料筆數       ：{total_records}")
-    print(f"  • 合併後獨立公廁總數 ：{len(valid_docs)}")
-    print(f"  • 新增筆數 (Upserted)：{total_upserted}")
-    print(f"  • 更新筆數 (Modified)：{total_modified}")
-    print(f"  • 比對相符 (Matched) ：{total_matched}")
-    print(f"  • 目前資料庫總筆數   ：{collection.count_documents({})}")
-    print("=" * 68)
+    run_import(
+        file_path=args.file,
+        env_file=args.env_file,
+        uri=args.uri,
+        db=args.db,
+        collection=args.collection,
+        drop=args.drop,
+        dry_run=args.dry_run,
+        batch_size=args.batch_size
+    )
 
 
 if __name__ == "__main__":
