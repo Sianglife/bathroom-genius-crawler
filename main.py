@@ -28,7 +28,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
 
 # 匯入各模組功能
 import import_moenv_api
-import import_datataipei_json
+# import import_datataipei_json
 import clean_data
 
 
@@ -101,29 +101,29 @@ def run_pipeline(
             print(f"❌ [Step 1/3] 環境部 MOENV API 匯入失敗：{e}\n")
 
     # --------------------------------------------------------------------------
-    # Step 2: Import Data.Taipei JSON
+    # Step 2: Import Data.Taipei JSON (暫時取消/註解)
     # --------------------------------------------------------------------------
-    if skip_taipei:
-        print("⏭️  [Step 2/3] 跳過臺北市 Data.Taipei 資料匯入 (--skip-taipei)\n")
-    else:
-        print("🔹" * 40)
-        print("🏙️  [Step 2/3] 執行臺北市政府 (Data.Taipei) 公廁開放資料匯入...")
-        print("🔹" * 40)
-        try:
-            taipei_stats = import_datataipei_json.run_import(
-                file_path=taipei_file,
-                env_file=env_file,
-                uri=mongo_uri,
-                db=mongo_db_name,
-                collection=collection,
-                drop=False,
-                dry_run=dry_run,
-                batch_size=batch_size
-            )
-            summary_stats["taipei"] = taipei_stats
-            print("✅ [Step 2/3] 臺北市 Data.Taipei 資料處理完成！\n")
-        except Exception as e:
-            print(f"❌ [Step 2/3] 臺北市 Data.Taipei 匯入失敗：{e}\n")
+    # if skip_taipei:
+    #     print("⏭️  [Step 2/3] 跳過臺北市 Data.Taipei 資料匯入 (--skip-taipei)\n")
+    # else:
+    #     print("🔹" * 40)
+    #     print("🏙️  [Step 2/3] 執行臺北市政府 (Data.Taipei) 公廁開放資料匯入...")
+    #     print("🔹" * 40)
+    #     try:
+    #         taipei_stats = import_datataipei_json.run_import(
+    #             file_path=taipei_file,
+    #             env_file=env_file,
+    #             uri=mongo_uri,
+    #             db=mongo_db_name,
+    #             collection=collection,
+    #             drop=False,
+    #             dry_run=dry_run,
+    #             batch_size=batch_size
+    #         )
+    #         summary_stats["taipei"] = taipei_stats
+    #         print("✅ [Step 2/3] 臺北市 Data.Taipei 資料處理完成！\n")
+    #     except Exception as e:
+    #         print(f"❌ [Step 2/3] 臺北市 Data.Taipei 匯入失敗：{e}\n")
 
     # --------------------------------------------------------------------------
     # Step 3: Clean Data in MongoDB

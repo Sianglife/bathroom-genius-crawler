@@ -55,8 +55,11 @@ except ImportError:
 # ==============================================================================
 MOENV_API_KEY = "40eaf06a-f396-4f27-8703-016cebce83c8"
 
-# 展開之代碼清單：07、10-31 (共 23 個公廁資料端點)
-ENDPOINT_CODES: List[str] = ["07"] + [f"{i:02d}" for i in range(10, 32)]
+# 展開之代碼清單：07、10-31 (共 23 個公廁資料端點，全台灣)
+# ENDPOINT_CODES: List[str] = ["07"] + [f"{i:02d}" for i in range(10, 32)]
+
+# 北北基桃代碼清單：18 (基隆)、21 (新北)、28 (臺北)、16 (桃園)
+ENDPOINT_CODES: List[str] = ["18", "21", "28", "16"]
 
 MOENV_API_ENDPOINTS: List[str] = [
     f"https://data.moenv.gov.tw/api/v2/fac_p_{code}?offset=0&limit=1000&api_key={MOENV_API_KEY}"
