@@ -322,7 +322,7 @@ class TestMarkdownReportGeneration(unittest.TestCase):
             self.assertIn("經緯度一致性與名稱相似度特徵總覽", content)
             self.assertIn("桃園市蘆竹區南崁路一段112號", content)
             self.assertIn("台茂", content)
-            self.assertIn("📍 座標一致", content)
+            self.assertIn("同地址、同經緯度", content)
             self.assertIn("121.288210", content)
 
 

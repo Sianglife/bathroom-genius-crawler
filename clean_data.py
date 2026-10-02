@@ -599,49 +599,85 @@ def analyze_same_address_different_names(
 
     if print_report:
         total_clusters = len(different_name_clusters)
-        identical_c = sum(1 for c in different_name_clusters if c["coord_category"] == "identical")
-        close_c = sum(1 for c in different_name_clusters if c["coord_category"] == "close")
-        divergent_c = sum(1 for c in different_name_clusters if c["coord_category"] == "divergent")
-        no_coord_c = sum(1 for c in different_name_clusters if c["coord_category"] == "no_coords")
+        identical_clusters = [c for c in different_name_clusters if c["coord_category"] == "identical"]
+        divergent_clusters = [c for c in different_name_clusters if c["coord_category"] != "identical"]
+        
+        identical_c = len(identical_clusters)
+        close_c = sum(1 for c in divergent_clusters if c["coord_category"] == "close")
+        divergent_c = sum(1 for c in divergent_clusters if c["coord_category"] == "divergent")
+        no_coord_c = sum(1 for c in divergent_clusters if c["coord_category"] == "no_coords")
         prefix_c = sum(1 for c in different_name_clusters if c["common_prefix"])
 
-        print("\n" + "=" * 78)
+        print("\n" + "=" * 80)
         print("🏢 【地址相同但名稱不同】之公廁群組分析報告")
-        print("=" * 78)
+        print("=" * 80)
         print(f"📊 總計發現 {total_clusters} 處地點存在「相同地址但不同主體名稱」的公廁：\n")
         if total_clusters > 0:
             print("   🌐 經緯度一致性分佈：")
-            print(f"     📍 經緯度完全一致  : {identical_c:>4} 處 ({(identical_c / total_clusters * 100):.1f}%)")
-            print(f"     📐 經緯度相近 (<50m) : {close_c:>4} 處 ({(close_c / total_clusters * 100):.1f}%)")
-            print(f"     ⚠️ 經緯度相異 (>=50m): {divergent_c:>4} 處 ({(divergent_c / total_clusters * 100):.1f}%)")
+            print(f"     📍 【同地址、同經緯度座標】: {identical_c:>4} 處 ({(identical_c / total_clusters * 100):.1f}%) —— 座標完全重疊")
+            print(f"     📐 經緯度相近 (<50m)      : {close_c:>4} 處 ({(close_c / total_clusters * 100):.1f}%)")
+            print(f"     ⚠️ 經緯度分散 (>=50m)     : {divergent_c:>4} 處 ({(divergent_c / total_clusters * 100):.1f}%)")
             if no_coord_c > 0:
-                print(f"     ❓ 缺少經緯度     : {no_coord_c:>4} 處 ({(no_coord_c / total_clusters * 100):.1f}%)")
+                print(f"     ❓ 缺少經緯度          : {no_coord_c:>4} 處 ({(no_coord_c / total_clusters * 100):.1f}%)")
             print("   🏷️ 名稱結構特徵：")
             print(f"     🏷️ 具共同前綴(同主體/樓層/分區): {prefix_c:>4} 處 ({(prefix_c / total_clusters * 100):.1f}%)")
             print(f"     🏢 多機關/多元商戶共用地址     : {total_clusters - prefix_c:>4} 處 ({((total_clusters - prefix_c) / total_clusters * 100):.1f}%)\n")
 
-        if not different_name_clusters:
-            print("  ✨ 未發現任何相同地址但不同名稱的公廁紀錄。")
+        # 1. 印出【同地址、同經緯度座標】清單
+        print("=" * 80)
+        print(f"📍 【同地址、同經緯度座標】公廁群組清單（共 {len(identical_clusters)} 處，顯示前 15 筆）：")
+        print("=" * 80)
+        if not identical_clusters:
+            print("  ✨ 無同地址且同經緯度之公廁群組。")
         else:
-            for idx, c in enumerate(different_name_clusters[:25], 1):
+            for idx, c in enumerate(identical_clusters[:15], 1):
                 raw_addr_str = " | ".join(c["raw_addresses"][:2])
-                print(f"[{idx:02d}] 📍 地址：{c['normalized_address']}")
+                print(f"[A-{idx:02d}] 📍 地址：{c['normalized_address']}")
                 if raw_addr_str and raw_addr_str != c['normalized_address']:
-                    print(f"     原始地址：{raw_addr_str}")
-                print(f"     包含 {c['distinct_name_count']} 個不同主體名稱 (共 {c['total_records']} 筆紀錄) | {c['name_feature']}")
-                print(f"     🌐 經緯度狀態：{c['coord_status']}")
-                for v in c["venues"]:
+                    print(f"       原始地址：{raw_addr_str}")
+                print(f"       包含 {c['distinct_name_count']} 個不同主體名稱 (共 {c['total_records']} 筆紀錄) | {c['name_feature']}")
+                print(f"       🌐 經緯度狀態：{c['coord_status']}")
+                for v in c["venues"][:10]:
                     acc_badge = "♿ 無障礙" if v["isAccessible"] else ""
                     fam_badge = "👶 親子" if v.get("isFamily") else ""
                     tp_badge = "🧻 衛生紙" if v["hasToiletPaper"] else ""
                     badges = " ".join(b for b in [acc_badge, fam_badge, tp_badge] if b)
                     badge_str = f" [{badges}]" if badges else ""
-                    print(f"       • {v['name']} ({v['record_count']} 筆){badge_str} 📍 {v['coordinate_str']}")
-                print("-" * 78)
+                    print(f"         • {v['name']} ({v['record_count']} 筆){badge_str} 📍 {v['coordinate_str']}")
+                if len(c["venues"]) > 10:
+                    print(f"         ... (另有 {len(c['venues']) - 10} 項子設施已省略)")
+                print("-" * 80)
+            if len(identical_clusters) > 15:
+                print(f"  ... 另有 {len(identical_clusters) - 15} 處同地址同座標群組已完整收錄於 clean.md。")
 
-            if len(different_name_clusters) > 25:
-                print(f"  ... 另有 {len(different_name_clusters) - 25} 處同地址異名群組未在終端機完整展開。")
-        print("=" * 78 + "\n")
+        # 2. 印出【同地址、相異經緯度座標】清單
+        print("\n" + "=" * 80)
+        print(f"🌐 【同地址、相異經緯度座標】公廁群組清單（共 {len(divergent_clusters)} 處，顯示前 15 筆）：")
+        print("=" * 80)
+        if not divergent_clusters:
+            print("  ✨ 無同地址且相異經緯度之公廁群組。")
+        else:
+            for idx, c in enumerate(divergent_clusters[:15], 1):
+                raw_addr_str = " | ".join(c["raw_addresses"][:2])
+                print(f"[B-{idx:02d}] 📍 地址：{c['normalized_address']}")
+                if raw_addr_str and raw_addr_str != c['normalized_address']:
+                    print(f"       原始地址：{raw_addr_str}")
+                print(f"       包含 {c['distinct_name_count']} 個不同主體名稱 (共 {c['total_records']} 筆紀錄) | {c['name_feature']}")
+                print(f"       🌐 經緯度狀態：{c['coord_status']}")
+                for v in c["venues"][:10]:
+                    acc_badge = "♿ 無障礙" if v["isAccessible"] else ""
+                    fam_badge = "👶 親子" if v.get("isFamily") else ""
+                    tp_badge = "🧻 衛生紙" if v["hasToiletPaper"] else ""
+                    badges = " ".join(b for b in [acc_badge, fam_badge, tp_badge] if b)
+                    badge_str = f" [{badges}]" if badges else ""
+                    print(f"         • {v['name']} ({v['record_count']} 筆){badge_str} 📍 {v['coordinate_str']}")
+                if len(c["venues"]) > 10:
+                    print(f"         ... (另有 {len(c['venues']) - 10} 項子設施已省略)")
+                print("-" * 80)
+            if len(divergent_clusters) > 15:
+                print(f"  ... 另有 {len(divergent_clusters) - 15} 處同地址相異座標群組已完整收錄於 clean.md。")
+
+        print("=" * 80 + "\n")
 
     return different_name_clusters
 
@@ -652,7 +688,7 @@ def generate_markdown_report(
     output_path: Optional[Union[str, Path]] = "clean.md",
 ) -> Optional[Path]:
     """
-    將資料庫清洗與合併統計資訊、經緯度一致性分析及同地址異名群組產出為 Markdown 格式報告 (clean.md)
+    將資料庫清洗與合併統計資訊、同地址同座標清單、同地址相異座標清單產出為 Markdown 格式報告 (clean.md)
     """
     if not output_path or str(output_path).lower() in ("none", "false", "0", ""):
         return None
@@ -673,7 +709,8 @@ def generate_markdown_report(
     accessible = stats.get("accessible_count", 0)
     family = stats.get("family_count", 0)
     toilet_paper = stats.get("toilet_paper_count", 0)
-    clusters_count = stats.get("diff_name_clusters_count", len(diff_name_clusters) if diff_name_clusters else 0)
+    clusters = diff_name_clusters or []
+    clusters_count = stats.get("diff_name_clusters_count", len(clusters))
 
     # 計算百分比
     reduction_rate = (deleted_count / total_before * 100.0) if total_before > 0 else 0.0
@@ -686,15 +723,15 @@ def generate_markdown_report(
     fam_pct = (family / total_after * 100.0) if total_after > 0 else 0.0
     tp_pct = (toilet_paper / total_after * 100.0) if total_after > 0 else 0.0
 
-    gen_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 區分「同地址同座標」與「同地址相異座標」群組
+    identical_clusters = [c for c in clusters if c.get("coord_category") == "identical"]
+    divergent_clusters = [c for c in clusters if c.get("coord_category") != "identical"]
 
-    # 經緯度一致性與名稱相似度統計
-    clusters = diff_name_clusters or []
     total_clusters = len(clusters)
-    identical_coords_count = sum(1 for c in clusters if c.get("coord_category") == "identical")
-    close_coords_count = sum(1 for c in clusters if c.get("coord_category") == "close")
-    divergent_coords_count = sum(1 for c in clusters if c.get("coord_category") == "divergent")
-    no_coords_count = sum(1 for c in clusters if c.get("coord_category") == "no_coords")
+    identical_coords_count = len(identical_clusters)
+    close_coords_count = sum(1 for c in divergent_clusters if c.get("coord_category") == "close")
+    divergent_coords_count = sum(1 for c in divergent_clusters if c.get("coord_category") == "divergent")
+    no_coords_count = sum(1 for c in divergent_clusters if c.get("coord_category") == "no_coords")
     similar_names_count = sum(1 for c in clusters if c.get("common_prefix"))
     multi_entities_count = total_clusters - similar_names_count
 
@@ -705,12 +742,14 @@ def generate_markdown_report(
     sim_pct = (similar_names_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
     multi_pct = (multi_entities_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
 
+    gen_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     lines = [
         "# 🚽 Bathroom Genius - 資料庫清洗與合併統計報告 (clean.md)",
         "",
         f"> 🕒 **報告生成時間**：`{gen_time_str}`  ",
         "> 📁 **執行模組**：`clean_data.py`  ",
-        "> 🎯 **清洗目標**：MongoDB 公廁資料庫去重合併、性別/無障礙/親子設施正規化與同地址異名分析（含經緯度一致性校驗）",
+        "> 🎯 **清洗目標**：MongoDB 公廁資料庫去重合併、性別/無障礙/親子設施正規化與同地址異名分析（含同經緯度獨立清單）",
         "",
         "---",
         "",
@@ -724,6 +763,8 @@ def generate_markdown_report(
         f"| **單筆公廁紀錄清洗數** | **{single_updates:,}** 筆 | 單獨一筆直接完成正規化之公廁 |",
         f"| **移除多餘重複筆數** | **{deleted_count:,}** 筆 | 去重精簡率：**{reduction_rate:.1f}%** |",
         f"| **同地址異名公廁群組** | **{clusters_count:,}** 處 | 同一實體地址內包含多個不同名稱之公廁 |",
+        f"| └ 📍 **同地址、同經緯度** | **{identical_coords_count:,}** 處 | 佔異名群組：**{id_pct:.1f}%**（完全重疊/同棟分區） |",
+        f"| └ 🌐 **同地址、相異經緯度** | **{len(divergent_clusters):,}** 處 | 佔異名群組：**{100.0 - id_pct:.1f}%**（微幅偏移或分散） |",
         "",
         "---",
         "",
@@ -765,19 +806,58 @@ def generate_markdown_report(
         f"| **名稱相似度** | 🏷️ **類似名稱 (同主體分區)** | **{similar_names_count:,}** 處 | **{sim_pct:.1f}%** | 具有共同名稱前綴（如商場、醫院、園區多樓層分區） |",
         f"| | 🏢 **多機關/商戶共用地址** | **{multi_entities_count:,}** 處 | **{multi_pct:.1f}%** | 複合型據點，包含多個不同機關或商戶 |",
         "",
+        "---",
+        "",
+        f"### 4.1 📍【同地址、同經緯度座標】公廁群組清單（共 {len(identical_clusters):,} 處）",
+        "",
+        "> 💡 **清單特徵**：此清單收錄所有**實體門牌地址相同且經緯度完全一致 (座標完全重疊)** 之公廁群組。  ",
+        "> 此類據點高度代表同一棟建築物、百貨商場、體育館或機關內部不同樓層與分區之公廁設施。",
+        "",
     ]
 
-    if diff_name_clusters:
-        lines.append("### 📋 同地址異名群組詳細列表 (按不同名稱數量排序)")
-        lines.append("")
-        for idx, c in enumerate(diff_name_clusters, 1):
+    if identical_clusters:
+        for idx, c in enumerate(identical_clusters, 1):
             raw_addrs = [a for a in c.get("raw_addresses", []) if a and a != c["normalized_address"]]
             raw_addr_str = f"（原始地址包含：{'、'.join(raw_addrs)}）" if raw_addrs else ""
-            
             name_badge = f"`🏷️ 類似名稱 (同主體: {c['common_prefix']})`" if c.get("common_prefix") else "`🏢 多機關/商戶共用地址`"
-            coord_badge_str = f"`{c.get('coord_badge', '📍 座標一致')}`"
+            coord_str = c["venues"][0]["coordinate_str"] if c.get("venues") else "無座標"
 
-            lines.append(f"#### [{idx:03d}] 📍 {c['normalized_address']} {raw_addr_str}")
+            lines.append(f"#### [A-{idx:03d}] 📍 {c['normalized_address']} {raw_addr_str}")
+            lines.append(f"- **名稱特徵標記**：{name_badge} —— {c.get('name_feature', '')}")
+            lines.append(f"- **經緯度座標**：`📍 {coord_str}`（群組內 {c['total_records']} 筆設施座標 100% 一致）")
+            lines.append(f"- **包含不同主體名稱數**：{c['distinct_name_count']} 個（群組內原始紀錄共 {c['total_records']} 筆）")
+            lines.append("- **各子主體名稱與設施清單**：")
+            for v in c.get("venues", []):
+                badges = []
+                if v.get("isAccessible"):
+                    badges.append("♿ 無障礙")
+                if v.get("isFamily"):
+                    badges.append("👶 親子")
+                if v.get("hasToiletPaper"):
+                    badges.append("🧻 衛生紙")
+                badge_str = f" `{' '.join(badges)}`" if badges else ""
+                lines.append(f"  - **{v['name']}** ({v['record_count']} 筆){badge_str} `📍 {v.get('coordinate_str', '')}`")
+            lines.append("")
+    else:
+        lines.append("✨ 未發現任何同地址且同經緯度座標之公廁紀錄。\n")
+
+    lines.extend([
+        "---",
+        "",
+        f"### 4.2 🌐【同地址、相異經緯度座標】公廁群組清單（共 {len(divergent_clusters):,} 處）",
+        "",
+        "> 💡 **清單特徵**：此清單收錄座落於相同地址但**各子設施經緯度存在微幅偏移 (< 50m) 或明顯分散 (>= 50m)** 之公廁群組（如大型園區、文教特區、醫院多棟院區或出入口分開之設施）。",
+        "",
+    ])
+
+    if divergent_clusters:
+        for idx, c in enumerate(divergent_clusters, 1):
+            raw_addrs = [a for a in c.get("raw_addresses", []) if a and a != c["normalized_address"]]
+            raw_addr_str = f"（原始地址包含：{'、'.join(raw_addrs)}）" if raw_addrs else ""
+            name_badge = f"`🏷️ 類似名稱 (同主體: {c['common_prefix']})`" if c.get("common_prefix") else "`🏢 多機關/商戶共用地址`"
+            coord_badge_str = f"`{c.get('coord_badge', '⚠️ 座標相異')}`"
+
+            lines.append(f"#### [B-{idx:03d}] 📍 {c['normalized_address']} {raw_addr_str}")
             lines.append(f"- **名稱特徵標記**：{name_badge} —— {c.get('name_feature', '')}")
             lines.append(f"- **經緯度分析報告**：{coord_badge_str} —— {c.get('coord_status', '')}")
             lines.append(f"- **包含不同主體名稱數**：{c['distinct_name_count']} 個（群組內原始紀錄共 {c['total_records']} 筆）")
@@ -791,12 +871,10 @@ def generate_markdown_report(
                 if v.get("hasToiletPaper"):
                     badges.append("🧻 衛生紙")
                 badge_str = f" `{' '.join(badges)}`" if badges else ""
-                coord_v_str = f"`📍 {v.get('coordinate_str', '')}`"
-                lines.append(f"  - **{v['name']}** ({v['record_count']} 筆){badge_str} {coord_v_str}")
+                lines.append(f"  - **{v['name']}** ({v['record_count']} 筆){badge_str} `📍 {v.get('coordinate_str', '')}`")
             lines.append("")
     else:
-        lines.append("✨ 未發現任何相同地址但不同名稱之公廁紀錄。")
-        lines.append("")
+        lines.append("✨ 未發現任何同地址但相異經緯度座標之公廁紀錄。\n")
 
     content = "\n".join(lines)
     path.parent.mkdir(parents=True, exist_ok=True)
