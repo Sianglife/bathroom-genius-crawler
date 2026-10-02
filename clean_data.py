@@ -35,7 +35,7 @@ import unicodedata
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set, Union
 from collections import defaultdict
 
 # 確保 Windows 主控台輸出繁體中文與表情符號不會拋出 UnicodeEncodeError
@@ -387,6 +387,72 @@ def parse_coordinates(records: List[Dict[str, Any]]) -> Tuple[Optional[float], O
     return None, None
 
 
+
+def calculate_distance_meters(coord1: Tuple[float, float], coord2: Tuple[float, float]) -> float:
+    """計算兩個 [lng, lat] 座標間的大圓距離（公尺）"""
+    import math
+    lng1, lat1 = coord1
+    lng2, lat2 = coord2
+    if abs(lng1 - lng2) < 1e-7 and abs(lat1 - lat2) < 1e-7:
+        return 0.0
+
+    r = 6371000.0  # 地球平均半徑 (公尺)
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lng2 - lng1)
+
+    a = math.sin(delta_phi / 2.0) ** 2 + \
+        math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return r * c
+
+
+def extract_common_name_pattern(names: List[str]) -> Tuple[Optional[str], str]:
+    """
+    分析群組內多個公廁名稱的相似度與共同主體前綴。
+    返回: (common_prefix, description)
+    """
+    if not names:
+        return None, "無名稱"
+    if len(names) == 1:
+        return names[0], "單一名稱"
+
+    # 清理名稱中的樓層、數字、方位詞綴以取得純主體名稱
+    cleaned_names = []
+    for n in names:
+        cn = re.sub(r'[\(（].*?[\)）]', '', n)
+        cn = re.sub(r'[-_~—\s]*(?:[B\d一二三四五六七八九十]+[Ff樓層號棟]|東址|西址|醫學大樓|復健大樓|病理大樓|兒童[A-Z]|文化館|貴賓廳|停車場|大廳|門診|檢查區|超音波|訪客電梯|電梯|左側|右側|戶外|東|西|南|北|\d+區|\d+號廁所|\d+號|\d+).*$', '', cn).strip()
+        cleaned_names.append(cn if cn else n)
+
+    # 找出最長共同前綴
+    prefix = os.path.commonprefix(cleaned_names).strip("-_~— 、，/")
+    if len(prefix) >= 2:
+        matching_count = sum(1 for n in names if n.startswith(prefix))
+        if matching_count / len(names) >= 0.5:
+            return prefix, f"同主體設施分區 (共同前綴: 「{prefix}」)"
+
+    # 統計最頻繁出現的主體前綴 (2-8字元)
+    prefix_counts = defaultdict(int)
+    for cn in cleaned_names:
+        for length in range(2, min(8, len(cn) + 1)):
+            sub = cn[:length]
+            prefix_counts[sub] += 1
+
+    best_prefix = None
+    best_count = 0
+    for p, cnt in prefix_counts.items():
+        if cnt >= 2 and cnt / len(names) >= 0.5:
+            if cnt > best_count or (cnt == best_count and len(p) > len(best_prefix or "")):
+                best_prefix = p
+                best_count = cnt
+
+    if best_prefix and len(best_prefix) >= 2:
+        return best_prefix, f"同主體設施分區 (共同前綴: 「{best_prefix}」, 涵蓋 {best_count}/{len(names)} 項目)"
+
+    return None, "複合型據點 (包含多個不同機關或商戶)"
+
+
 def analyze_same_address_different_names(
     docs: List[Dict[str, Any]],
     print_report: bool = True
@@ -395,11 +461,24 @@ def analyze_same_address_different_names(
     分析並找出「地址相同（或正規化地址相同）但主體名稱 (Base Name) 不同」的公廁群組。
     例如同一市政大樓/商場/轉運站內有不同單位的公廁。
     
+    支援：
+    1. 經緯度一致性與距離分析（完全相同、相近、相異、無座標）。
+    2. 相似名稱與共同主體前綴特徵識別（同主體分區 vs 多機關共用）。
+
     返回詳細分析清單，每筆包含：
     - normalized_address: 正規化地址
     - raw_addresses: 群組內出現的所有原始地址列表
-    - venues: 包含的各個不同名稱公廁詳細資訊 (base_name, count, ids, tags, isAccessible, isFamily, hasToiletPaper)
+    - venues: 包含的各個不同名稱公廁詳細資訊 (base_name, count, ids, tags, isAccessible, isFamily, hasToiletPaper, coordinate, coordinate_str)
     - total_records: 該地址下的總筆數
+    - unique_coords: 該地址下所有不重複的經緯度座標清單
+    - unique_coords_count: 座標組數
+    - is_coords_identical: 經緯度是否完全相同 (True / False / None)
+    - max_coords_distance_meters: 最大經緯度間距（公尺）
+    - coord_category: 經緯度分類 ('identical', 'close', 'divergent', 'no_coords')
+    - coord_status: 經緯度分析說明
+    - coord_badge: 經緯度簡短標籤
+    - common_prefix: 共同主體前綴名稱
+    - name_feature: 名稱結構特徵說明
     """
     addr_groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
 
@@ -436,6 +515,10 @@ def analyze_same_address_different_names(
                 has_tp = any(sd.get("hasToiletPaper") is True for sd in sub_docs)
                 ids = [str(sd.get("_id", "")) for sd in sub_docs if sd.get("_id")]
 
+                lng, lat = parse_coordinates(sub_docs)
+                coord = (lng, lat) if (lng is not None and lat is not None) else None
+                coord_str = f"({lng:.6f}, {lat:.6f})" if coord else "(無經緯度)"
+
                 venues_info.append({
                     "name": bname or "(無名稱)",
                     "record_count": len(sub_docs),
@@ -443,7 +526,55 @@ def analyze_same_address_different_names(
                     "isAccessible": has_acc,
                     "isFamily": has_fam,
                     "hasToiletPaper": has_tp,
+                    "coordinate": coord,
+                    "coordinate_str": coord_str,
                 })
+
+            # 分析經緯度是否相同
+            valid_coords = [v["coordinate"] for v in venues_info if v["coordinate"] is not None]
+            
+            # 合併極近（1 公尺以內）的座標視為相同座標點
+            unique_coords: List[Tuple[float, float]] = []
+            for c in valid_coords:
+                if not any(calculate_distance_meters(c, u) < 1.0 for u in unique_coords):
+                    unique_coords.append(c)
+
+            max_dist_meters = 0.0
+            if len(unique_coords) >= 2:
+                for i in range(len(unique_coords)):
+                    for j in range(i + 1, len(unique_coords)):
+                        dist = calculate_distance_meters(unique_coords[i], unique_coords[j])
+                        if dist > max_dist_meters:
+                            max_dist_meters = dist
+
+            if len(unique_coords) == 0:
+                coord_category = "no_coords"
+                coord_status = "❓ 無經緯度資訊"
+                coord_badge = "❓ 無座標"
+                is_identical = None
+            elif len(unique_coords) == 1:
+                coord_category = "identical"
+                coord_status = f"✅ 經緯度完全相同 ({unique_coords[0][0]:.6f}, {unique_coords[0][1]:.6f})"
+                coord_badge = "📍 座標一致"
+                is_identical = True
+            elif max_dist_meters < 10.0:
+                coord_category = "close"
+                coord_status = f"📐 經緯度極微幅偏移 (< 10m，共 {len(unique_coords)} 組座標，最大相距 {max_dist_meters:.1f} 公尺)"
+                coord_badge = "📐 座標高度相近"
+                is_identical = False
+            elif max_dist_meters < 50.0:
+                coord_category = "close"
+                coord_status = f"📐 經緯度相近 (< 50m，共 {len(unique_coords)} 組座標，最大相距 {max_dist_meters:.1f} 公尺)"
+                coord_badge = "📐 座標相近"
+                is_identical = False
+            else:
+                coord_category = "divergent"
+                coord_status = f"⚠️ 經緯度明顯分散 (共 {len(unique_coords)} 組座標，最大相距 {max_dist_meters:.1f} 公尺)"
+                coord_badge = "⚠️ 座標相異"
+                is_identical = False
+
+            # 分析名稱相似度與前綴
+            common_prefix, name_feature_desc = extract_common_name_pattern([v["name"] for v in venues_info])
 
             cluster = {
                 "normalized_address": norm_addr,
@@ -451,6 +582,15 @@ def analyze_same_address_different_names(
                 "distinct_name_count": len(name_map),
                 "total_records": len(all_docs_in_addr),
                 "venues": venues_info,
+                "unique_coords": unique_coords,
+                "unique_coords_count": len(unique_coords),
+                "is_coords_identical": is_identical,
+                "max_coords_distance_meters": max_dist_meters,
+                "coord_category": coord_category,
+                "coord_status": coord_status,
+                "coord_badge": coord_badge,
+                "common_prefix": common_prefix,
+                "name_feature": name_feature_desc,
             }
             different_name_clusters.append(cluster)
 
@@ -458,10 +598,27 @@ def analyze_same_address_different_names(
     different_name_clusters.sort(key=lambda x: x["distinct_name_count"], reverse=True)
 
     if print_report:
+        total_clusters = len(different_name_clusters)
+        identical_c = sum(1 for c in different_name_clusters if c["coord_category"] == "identical")
+        close_c = sum(1 for c in different_name_clusters if c["coord_category"] == "close")
+        divergent_c = sum(1 for c in different_name_clusters if c["coord_category"] == "divergent")
+        no_coord_c = sum(1 for c in different_name_clusters if c["coord_category"] == "no_coords")
+        prefix_c = sum(1 for c in different_name_clusters if c["common_prefix"])
+
         print("\n" + "=" * 78)
         print("🏢 【地址相同但名稱不同】之公廁群組分析報告")
         print("=" * 78)
-        print(f"📊 總計發現 {len(different_name_clusters)} 處地點存在「相同地址但不同主體名稱」的公廁：\n")
+        print(f"📊 總計發現 {total_clusters} 處地點存在「相同地址但不同主體名稱」的公廁：\n")
+        if total_clusters > 0:
+            print("   🌐 經緯度一致性分佈：")
+            print(f"     📍 經緯度完全一致  : {identical_c:>4} 處 ({(identical_c / total_clusters * 100):.1f}%)")
+            print(f"     📐 經緯度相近 (<50m) : {close_c:>4} 處 ({(close_c / total_clusters * 100):.1f}%)")
+            print(f"     ⚠️ 經緯度相異 (>=50m): {divergent_c:>4} 處 ({(divergent_c / total_clusters * 100):.1f}%)")
+            if no_coord_c > 0:
+                print(f"     ❓ 缺少經緯度     : {no_coord_c:>4} 處 ({(no_coord_c / total_clusters * 100):.1f}%)")
+            print("   🏷️ 名稱結構特徵：")
+            print(f"     🏷️ 具共同前綴(同主體/樓層/分區): {prefix_c:>4} 處 ({(prefix_c / total_clusters * 100):.1f}%)")
+            print(f"     🏢 多機關/多元商戶共用地址     : {total_clusters - prefix_c:>4} 處 ({((total_clusters - prefix_c) / total_clusters * 100):.1f}%)\n")
 
         if not different_name_clusters:
             print("  ✨ 未發現任何相同地址但不同名稱的公廁紀錄。")
@@ -471,14 +628,15 @@ def analyze_same_address_different_names(
                 print(f"[{idx:02d}] 📍 地址：{c['normalized_address']}")
                 if raw_addr_str and raw_addr_str != c['normalized_address']:
                     print(f"     原始地址：{raw_addr_str}")
-                print(f"     包含 {c['distinct_name_count']} 個不同主體名稱 (共 {c['total_records']} 筆紀錄)：")
+                print(f"     包含 {c['distinct_name_count']} 個不同主體名稱 (共 {c['total_records']} 筆紀錄) | {c['name_feature']}")
+                print(f"     🌐 經緯度狀態：{c['coord_status']}")
                 for v in c["venues"]:
                     acc_badge = "♿ 無障礙" if v["isAccessible"] else ""
                     fam_badge = "👶 親子" if v.get("isFamily") else ""
                     tp_badge = "🧻 衛生紙" if v["hasToiletPaper"] else ""
                     badges = " ".join(b for b in [acc_badge, fam_badge, tp_badge] if b)
                     badge_str = f" [{badges}]" if badges else ""
-                    print(f"       • {v['name']} ({v['record_count']} 筆){badge_str}")
+                    print(f"       • {v['name']} ({v['record_count']} 筆){badge_str} 📍 {v['coordinate_str']}")
                 print("-" * 78)
 
             if len(different_name_clusters) > 25:
@@ -488,13 +646,174 @@ def analyze_same_address_different_names(
     return different_name_clusters
 
 
+def generate_markdown_report(
+    stats: Dict[str, Any],
+    diff_name_clusters: Optional[List[Dict[str, Any]]] = None,
+    output_path: Optional[Union[str, Path]] = "clean.md",
+) -> Optional[Path]:
+    """
+    將資料庫清洗與合併統計資訊、經緯度一致性分析及同地址異名群組產出為 Markdown 格式報告 (clean.md)
+    """
+    if not output_path or str(output_path).lower() in ("none", "false", "0", ""):
+        return None
+
+    path = Path(output_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+
+    total_before = stats.get("total_before", 0)
+    total_after = stats.get("total_after", 0)
+    merged_groups = stats.get("merged_groups", 0)
+    single_updates = stats.get("single_updates", 0)
+    deleted_count = stats.get("deleted_count", 0)
+    both_gender = stats.get("both_gender_count", 0)
+    male_only = stats.get("male_only_count", 0)
+    female_only = stats.get("female_only_count", 0)
+    no_gender = stats.get("no_gender_count", 0)
+    accessible = stats.get("accessible_count", 0)
+    family = stats.get("family_count", 0)
+    toilet_paper = stats.get("toilet_paper_count", 0)
+    clusters_count = stats.get("diff_name_clusters_count", len(diff_name_clusters) if diff_name_clusters else 0)
+
+    # 計算百分比
+    reduction_rate = (deleted_count / total_before * 100.0) if total_before > 0 else 0.0
+    both_pct = (both_gender / total_after * 100.0) if total_after > 0 else 0.0
+    male_pct = (male_only / total_after * 100.0) if total_after > 0 else 0.0
+    female_pct = (female_only / total_after * 100.0) if total_after > 0 else 0.0
+    no_gender_pct = (no_gender / total_after * 100.0) if total_after > 0 else 0.0
+
+    acc_pct = (accessible / total_after * 100.0) if total_after > 0 else 0.0
+    fam_pct = (family / total_after * 100.0) if total_after > 0 else 0.0
+    tp_pct = (toilet_paper / total_after * 100.0) if total_after > 0 else 0.0
+
+    gen_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 經緯度一致性與名稱相似度統計
+    clusters = diff_name_clusters or []
+    total_clusters = len(clusters)
+    identical_coords_count = sum(1 for c in clusters if c.get("coord_category") == "identical")
+    close_coords_count = sum(1 for c in clusters if c.get("coord_category") == "close")
+    divergent_coords_count = sum(1 for c in clusters if c.get("coord_category") == "divergent")
+    no_coords_count = sum(1 for c in clusters if c.get("coord_category") == "no_coords")
+    similar_names_count = sum(1 for c in clusters if c.get("common_prefix"))
+    multi_entities_count = total_clusters - similar_names_count
+
+    id_pct = (identical_coords_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+    close_pct = (close_coords_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+    div_pct = (divergent_coords_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+    no_coord_pct = (no_coords_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+    sim_pct = (similar_names_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+    multi_pct = (multi_entities_count / total_clusters * 100.0) if total_clusters > 0 else 0.0
+
+    lines = [
+        "# 🚽 Bathroom Genius - 資料庫清洗與合併統計報告 (clean.md)",
+        "",
+        f"> 🕒 **報告生成時間**：`{gen_time_str}`  ",
+        "> 📁 **執行模組**：`clean_data.py`  ",
+        "> 🎯 **清洗目標**：MongoDB 公廁資料庫去重合併、性別/無障礙/親子設施正規化與同地址異名分析（含經緯度一致性校驗）",
+        "",
+        "---",
+        "",
+        "## 📊 1. 資料庫清洗與合併核心指標 (Cleaning & Merging Overview)",
+        "",
+        "| 統計指標項目 | 筆數 / 數值 | 佔比說明 |",
+        "| :--- | :---: | :--- |",
+        f"| **資料庫原始公廁筆數** | **{total_before:,}** 筆 | 清洗前資料庫原始 Document 總數 |",
+        f"| **清洗合併後獨立公廁** | **{total_after:,}** 筆 | 去重合併後的獨立公廁據點數 |",
+        f"| **識別重複並合併組數** | **{merged_groups:,}** 組 | 包含多筆男女/無障礙/親子之同地點群組 |",
+        f"| **單筆公廁紀錄清洗數** | **{single_updates:,}** 筆 | 單獨一筆直接完成正規化之公廁 |",
+        f"| **移除多餘重複筆數** | **{deleted_count:,}** 筆 | 去重精簡率：**{reduction_rate:.1f}%** |",
+        f"| **同地址異名公廁群組** | **{clusters_count:,}** 處 | 同一實體地址內包含多個不同名稱之公廁 |",
+        "",
+        "---",
+        "",
+        "## 🏷️ 2. 性別標籤分佈 (Gender Tags Distribution)",
+        "",
+        f"> 基準總數：清洗合併後共 **{total_after:,}** 處獨立公廁",
+        "",
+        "| 性別標籤 | 據點數量 | 佔比 | 說明 |",
+        "| :--- | :---: | :---: | :--- |",
+        f"| 🚻 **男女廁 (同時具備男廁與女廁)** | **{both_gender:,}** 處 | **{both_pct:.1f}%** | 合併同地點男廁與女廁或標註男女之公廁 |",
+        f"| 🚹 **僅男廁** | **{male_only:,}** 處 | **{male_pct:.1f}%** | 僅設有男廁之據點 |",
+        f"| 🚺 **僅女廁** | **{female_only:,}** 處 | **{female_pct:.1f}%** | 僅設有女廁之據點 |",
+        f"| ⚪ **無性別標記** | **{no_gender:,}** 處 | **{no_gender_pct:.1f}%** | 通用公廁、單一隔間或原始資料未標註性別 |",
+        "",
+        "---",
+        "",
+        "## ♿ 3. 友善設施與衛生紙配備 (Accessibility & Amenities)",
+        "",
+        "| 友善設施項目 | 據點數量 | 涵蓋率 | 說明與規則 |",
+        "| :--- | :---: | :---: | :--- |",
+        f"| ♿ **無障礙設施 (`isAccessible: true`)** | **{accessible:,}** 處 | **{acc_pct:.1f}%** | Positive Priority：合併時任一筆有則保留 True |",
+        f"| 👶 **親子友善設施 (`tags: 親子`)** | **{family:,}** 處 | **{fam_pct:.1f}%** | 具尿布台或親子廁所標記 |",
+        f"| 🧻 **提供衛生紙 (`hasToiletPaper: true`)** | **{toilet_paper:,}** 處 | **{tp_pct:.1f}%** | Positive Priority：合併時任一筆有則保留 True |",
+        "",
+        "---",
+        "",
+        "## 🏢 4. 【同地址但不同主體名稱】之公廁群組分析報告 (Same Address Different Names)",
+        "",
+        f"> 總計發現 **{clusters_count:,}** 處實體地址存在多個不同主體名稱之公廁（例如同一行政中心、大型醫院、百貨商場、捷運或文教園區不同樓層/分區之公廁）。",
+        "",
+        "### 🌐 經緯度一致性與名稱相似度特徵總覽",
+        "",
+        "| 分析維度 | 分析分類 | 群組數量 | 佔比 | 說明 |",
+        "| :--- | :--- | :---: | :---: | :--- |",
+        f"| **經緯度一致性** | 📍 **經緯度完全一致** | **{identical_coords_count:,}** 處 | **{id_pct:.1f}%** | 同地址下所有不同名稱設施座標完全相同 |",
+        f"| | 📐 **經緯度相近 (< 50m)** | **{close_coords_count:,}** 處 | **{close_pct:.1f}%** | 座標微幅偏移（如同一建築不同出入口或樓棟） |",
+        f"| | ⚠️ **經緯度相異 (>= 50m)** | **{divergent_coords_count:,}** 處 | **{div_pct:.1f}%** | 座標分散不同區塊或定位有明顯差異 |",
+        f"| | ❓ **無經緯度資訊** | **{no_coords_count:,}** 處 | **{no_coord_pct:.1f}%** | 原始資料缺少經緯度 |",
+        f"| **名稱相似度** | 🏷️ **類似名稱 (同主體分區)** | **{similar_names_count:,}** 處 | **{sim_pct:.1f}%** | 具有共同名稱前綴（如商場、醫院、園區多樓層分區） |",
+        f"| | 🏢 **多機關/商戶共用地址** | **{multi_entities_count:,}** 處 | **{multi_pct:.1f}%** | 複合型據點，包含多個不同機關或商戶 |",
+        "",
+    ]
+
+    if diff_name_clusters:
+        lines.append("### 📋 同地址異名群組詳細列表 (按不同名稱數量排序)")
+        lines.append("")
+        for idx, c in enumerate(diff_name_clusters, 1):
+            raw_addrs = [a for a in c.get("raw_addresses", []) if a and a != c["normalized_address"]]
+            raw_addr_str = f"（原始地址包含：{'、'.join(raw_addrs)}）" if raw_addrs else ""
+            
+            name_badge = f"`🏷️ 類似名稱 (同主體: {c['common_prefix']})`" if c.get("common_prefix") else "`🏢 多機關/商戶共用地址`"
+            coord_badge_str = f"`{c.get('coord_badge', '📍 座標一致')}`"
+
+            lines.append(f"#### [{idx:03d}] 📍 {c['normalized_address']} {raw_addr_str}")
+            lines.append(f"- **名稱特徵標記**：{name_badge} —— {c.get('name_feature', '')}")
+            lines.append(f"- **經緯度分析報告**：{coord_badge_str} —— {c.get('coord_status', '')}")
+            lines.append(f"- **包含不同主體名稱數**：{c['distinct_name_count']} 個（群組內原始紀錄共 {c['total_records']} 筆）")
+            lines.append("- **各子主體名稱與設施清單**：")
+            for v in c.get("venues", []):
+                badges = []
+                if v.get("isAccessible"):
+                    badges.append("♿ 無障礙")
+                if v.get("isFamily"):
+                    badges.append("👶 親子")
+                if v.get("hasToiletPaper"):
+                    badges.append("🧻 衛生紙")
+                badge_str = f" `{' '.join(badges)}`" if badges else ""
+                coord_v_str = f"`📍 {v.get('coordinate_str', '')}`"
+                lines.append(f"  - **{v['name']}** ({v['record_count']} 筆){badge_str} {coord_v_str}")
+            lines.append("")
+    else:
+        lines.append("✨ 未發現任何相同地址但不同名稱之公廁紀錄。")
+        lines.append("")
+
+    content = "\n".join(lines)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return path
+
+
 def clean_existing_database(
     uri: str,
     db_name: str,
     collection_name: str = "toilets",
     dry_run: bool = False,
     batch_size: int = 500,
-    show_diff_names_report: bool = True
+    show_diff_names_report: bool = True,
+    output_md: Optional[str] = "clean.md"
 ) -> Dict[str, Any]:
     """
     直接讀取並清洗 MongoDB 資料庫中已存在的公廁資料：
@@ -721,6 +1040,12 @@ def clean_existing_database(
     print(f"  • 友善設施 - 無障礙設施: {stats['accessible_count']}")
     print(f"  • 友善設施 - 親子友善:   {stats['family_count']}")
     print(f"  • 提供衛生紙地點數:     {stats['toilet_paper_count']}")
+
+    # 生成 Markdown 報告 (clean.md)
+    if output_md:
+        md_file = generate_markdown_report(stats, diff_name_clusters, output_path=output_md)
+        if md_file:
+            print(f"📝 統計報告已成功生成至: {md_file.name}")
 
     if dry_run:
         print("\n✨ [Dry-Run 模式] 檢驗完畢，未對 MongoDB 進行實際寫入或刪除。")
@@ -1024,6 +1349,11 @@ def main():
         action="store_true",
         help="僅列出地址相同但名稱不同之公廁分析報告，不執行資料庫清洗",
     )
+    parser.add_argument(
+        "--output-md",
+        default="clean.md",
+        help="輸出 Markdown 統計報告檔案路徑 (預設: clean.md，設為 none 則不輸出)",
+    )
 
     args = parser.parse_args()
 
@@ -1045,7 +1375,19 @@ def main():
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
         client.admin.command("ping")
         docs = list(client[mongo_db_name][args.collection].find({}))
-        analyze_same_address_different_names(docs, print_report=True)
+        diff_clusters = analyze_same_address_different_names(docs, print_report=True)
+        if args.output_md and args.output_md.lower() not in ("none", "false", "0", ""):
+            md_file = generate_markdown_report(
+                stats={
+                    "total_before": len(docs),
+                    "total_after": len(docs),
+                    "diff_name_clusters_count": len(diff_clusters),
+                },
+                diff_name_clusters=diff_clusters,
+                output_path=args.output_md
+            )
+            if md_file:
+                print(f"📝 分析報告已成功生成至: {md_file.name}")
         client.close()
         return
 
@@ -1055,7 +1397,8 @@ def main():
         collection_name=args.collection,
         dry_run=args.dry_run,
         batch_size=args.batch_size,
-        show_diff_names_report=True
+        show_diff_names_report=True,
+        output_md=args.output_md
     )
     print("\n🎉 資料庫清洗作業順利完成！")
 

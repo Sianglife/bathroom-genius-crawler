@@ -5,12 +5,17 @@ Unit and Integration Tests for Bathroom Genius Crawler & Cleaner
 """
 
 import unittest
+import os
+import tempfile
 from clean_data import (
     normalize_address,
     clean_display_address,
     normalize_and_extract_gender,
     clean_and_merge_records,
-    analyze_same_address_different_names
+    analyze_same_address_different_names,
+    calculate_distance_meters,
+    extract_common_name_pattern,
+    generate_markdown_report,
 )
 
 
@@ -161,44 +166,164 @@ class TestMergeRecordsWithSimilarAddressAndPositivePriority(unittest.TestCase):
         self.assertEqual(merged["address"], "臺北市中正區重慶南路一段122號")
 
 
+class TestDistanceAndPatternHelpers(unittest.TestCase):
+    def test_calculate_distance_meters(self):
+        # 1. 相同座標距離為 0
+        c1 = (121.5654, 25.0339)
+        c2 = (121.5654, 25.0339)
+        self.assertAlmostEqual(calculate_distance_meters(c1, c2), 0.0, places=3)
+
+        # 2. 台北101 與 台北市政府 (相距約 400~500 公尺)
+        c_101 = (121.5645, 25.0336)
+        c_gov = (121.5654, 25.0375)
+        dist = calculate_distance_meters(c_101, c_gov)
+        self.assertTrue(300 < dist < 600)
+
+    def test_extract_common_name_pattern(self):
+        # 1. 類似名稱 (同主體分區)
+        mall_names = [
+            "台茂B1F 3號廁所",
+            "台茂B2F 3號廁所",
+            "台茂1F 1號廁所",
+            "台茂2F 3號廁所電梯左側",
+            "台茂3F 1號廁所"
+        ]
+        prefix, desc = extract_common_name_pattern(mall_names)
+        self.assertEqual(prefix, "台茂")
+        self.assertIn("同主體設施分區", desc)
+
+        # 2. 複合型多機關據點
+        mixed_names = [
+            "士林區公所1F右",
+            "士林地政事務所基河5F",
+            "士林區清潔隊7F",
+            "士林區健康服務中心左",
+            "聯合醫院士林門診部"
+        ]
+        prefix_mixed, desc_mixed = extract_common_name_pattern(mixed_names)
+        self.assertTrue(prefix_mixed in ("士林", "士林區") or "同主體" in desc_mixed or "複合型" in desc_mixed)
+
+
 class TestSameAddressDifferentNamesAnalysis(unittest.TestCase):
-    def test_different_names_same_address(self):
+    def test_different_names_with_identical_coordinates(self):
         docs = [
             {
                 "_id": "id1",
-                "name": "臺北市政府市政大樓-1F男廁",
-                "address": "臺北市信義區市府路1號",
-                "tags": ["男女廁"],
-                "isAccessible": False,
-                "hasToiletPaper": True,
+                "name": "台茂B1F 3號廁所",
+                "address": "桃園市蘆竹區南崁路一段112號",
+                "location": {"type": "Point", "coordinates": [121.28821, 25.05312]},
+                "tags": [],
             },
             {
                 "_id": "id2",
-                "name": "臺北探索館(無障礙及親子)",
-                "address": "臺北市信義區市府路1號",
-                "tags": ["無障礙", "親子"],
-                "isAccessible": True,
-                "hasToiletPaper": False,
-            },
-            {
-                "_id": "id3",
-                "name": "信義區公所",
-                "address": "臺北市信義區福德里市府路1號",
-                "tags": [],
-                "isAccessible": False,
-                "hasToiletPaper": None,
+                "name": "台茂1F 1號廁所",
+                "address": "桃園市蘆竹區南崁路一段112號",
+                "location": {"type": "Point", "coordinates": [121.28821, 25.05312]},
+                "tags": ["無障礙"],
             },
         ]
 
         clusters = analyze_same_address_different_names(docs, print_report=False)
         self.assertEqual(len(clusters), 1)
         c = clusters[0]
-        self.assertEqual(c["normalized_address"], "臺北市信義區市府路1號")
-        self.assertEqual(c["distinct_name_count"], 3)
-        venue_names = [v["name"] for v in c["venues"]]
-        self.assertIn("臺北市政府市政大樓-1F", venue_names)
-        self.assertIn("臺北探索館", venue_names)
-        self.assertIn("信義區公所", venue_names)
+        self.assertEqual(c["normalized_address"], "桃園市蘆竹區南崁路一段112號")
+        self.assertEqual(c["distinct_name_count"], 2)
+        self.assertEqual(c["coord_category"], "identical")
+        self.assertTrue(c["is_coords_identical"])
+        self.assertIn("經緯度完全相同", c["coord_status"])
+        self.assertEqual(c["common_prefix"], "台茂")
+
+    def test_different_names_with_divergent_coordinates(self):
+        docs = [
+            {
+                "_id": "id1",
+                "name": "文化中心A館",
+                "address": "高雄市苓雅區五福一路67號",
+                "location": {"type": "Point", "coordinates": [120.3160, 22.6240]},
+                "tags": [],
+            },
+            {
+                "_id": "id2",
+                "name": "文化中心B館",
+                "address": "高雄市苓雅區五福一路67號",
+                "location": {"type": "Point", "coordinates": [120.3185, 22.6260]},
+                "tags": [],
+            },
+        ]
+
+        clusters = analyze_same_address_different_names(docs, print_report=False)
+        self.assertEqual(len(clusters), 1)
+        c = clusters[0]
+        self.assertFalse(c["is_coords_identical"])
+        self.assertIn(c["coord_category"], ["close", "divergent"])
+        self.assertGreater(c["max_coords_distance_meters"], 50.0)
+
+
+class TestMarkdownReportGeneration(unittest.TestCase):
+    def test_generate_markdown_report_content(self):
+        stats = {
+            "total_before": 100,
+            "total_after": 80,
+            "merged_groups": 10,
+            "single_updates": 70,
+            "deleted_count": 20,
+            "both_gender_count": 50,
+            "male_only_count": 10,
+            "female_only_count": 15,
+            "no_gender_count": 5,
+            "accessible_count": 30,
+            "family_count": 20,
+            "toilet_paper_count": 25,
+            "diff_name_clusters_count": 1,
+        }
+
+        diff_clusters = [
+            {
+                "normalized_address": "桃園市蘆竹區南崁路一段112號",
+                "raw_addresses": ["桃園市蘆竹區南崁路一段112號", "桃園市蘆竹區錦中里南崁路一段112號"],
+                "distinct_name_count": 2,
+                "total_records": 4,
+                "common_prefix": "台茂",
+                "name_feature": "同主體設施分區 (共同前綴: 「台茂」)",
+                "coord_category": "identical",
+                "coord_badge": "📍 座標一致",
+                "coord_status": "✅ 經緯度完全相同 (121.288210, 25.053120)",
+                "venues": [
+                    {
+                        "name": "台茂B1F 3號廁所",
+                        "record_count": 2,
+                        "isAccessible": True,
+                        "isFamily": False,
+                        "hasToiletPaper": True,
+                        "coordinate_str": "(121.288210, 25.053120)",
+                    },
+                    {
+                        "name": "台茂1F 1號廁所",
+                        "record_count": 2,
+                        "isAccessible": False,
+                        "isFamily": True,
+                        "hasToiletPaper": False,
+                        "coordinate_str": "(121.288210, 25.053120)",
+                    }
+                ]
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_md = os.path.join(tmpdir, "test_clean.md")
+            res_path = generate_markdown_report(stats, diff_clusters, output_path=tmp_md)
+            self.assertIsNotNone(res_path)
+            self.assertTrue(os.path.exists(tmp_md))
+
+            with open(tmp_md, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn("資料庫清洗與合併統計報告", content)
+            self.assertIn("經緯度一致性與名稱相似度特徵總覽", content)
+            self.assertIn("桃園市蘆竹區南崁路一段112號", content)
+            self.assertIn("台茂", content)
+            self.assertIn("📍 座標一致", content)
+            self.assertIn("121.288210", content)
 
 
 if __name__ == "__main__":

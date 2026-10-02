@@ -46,6 +46,7 @@ def run_pipeline(
     moenv_max_pages: Optional[int] = None,
     batch_size: int = 500,
     save_moenv_json: Optional[str] = None,
+    output_md: Optional[str] = "clean.md",
 ) -> Dict[str, Any]:
     """執行全流程公廁資料管線"""
     pipeline_start_time = time.time()
@@ -148,7 +149,8 @@ def run_pipeline(
                 collection_name=collection,
                 dry_run=dry_run,
                 batch_size=batch_size,
-                show_diff_names_report=True
+                show_diff_names_report=True,
+                output_md=output_md
             )
             summary_stats["clean"] = clean_stats
             print("✅ [Step 3/3] 資料庫清洗與合併完成！\n")
@@ -265,6 +267,11 @@ def main():
         default=500,
         help="批次寫入每批處理數量 (預設: 500)",
     )
+    parser.add_argument(
+        "--output-md",
+        default="clean.md",
+        help="輸出 Markdown 統計報告檔案路徑 (預設: clean.md，設為 none 則不輸出)",
+    )
 
     args = parser.parse_args()
 
@@ -282,6 +289,7 @@ def main():
         moenv_max_pages=args.moenv_max_pages,
         batch_size=args.batch_size,
         save_moenv_json=args.save_moenv_json,
+        output_md=args.output_md,
     )
 
 
